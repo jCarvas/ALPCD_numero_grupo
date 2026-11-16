@@ -47,6 +47,44 @@ app = typer.Typer(help="Pesquisa de exercícios físicos na API wger.", add_comp
 TAG_RE = re.compile(r"<[^>]+>")
 SPACES_RE = re.compile(r"\s+")
 
+# Alínea c) - palavras que indicam o tipo de esforço
+CARDIO_RE = re.compile(
+    r"\b(cardio|run(ning)?|jog(ging)?|sprints?|cycling|bike|swim(ming)?|"
+    r"jump(ing)? (rope|jacks?)|skipping|treadmill|elliptical|rowing machine|burpees?)\b",
+    re.IGNORECASE,
+)
+OTHER_RE = re.compile(r"\b(stretch(es|ing)?|yoga|mobility|warm[- ]?up)\b", re.IGNORECASE)
+COMPOUND_DESC_RE = re.compile(r"\b(compound|multi[- ]?joint)\b", re.IGNORECASE)
+ISOLATED_DESC_RE = re.compile(r"\b(isolat(ion|ed|es?|ing)|single[- ]?joint)\b", re.IGNORECASE)
+COMPOUND_NAME_RE = re.compile(
+    r"\b(squats?|deadlifts?|press(es)?|rows?|pull[- ]?ups?|chin[- ]?ups?|dips?|"
+    r"lunges?|push[- ]?ups?|cleans?|snatch(es)?|thrusters?)\b",
+    re.IGNORECASE,
+)
+ISOLATED_NAME_RE = re.compile(
+    r"\b(curls?|extensions?|raises?|fly|flys|flyes|flies|kickbacks?|shrugs?|"
+    r"crunch(es)?|push[- ]?downs?|pull[- ]?overs?)\b",
+    re.IGNORECASE,
+)
+
+# Alínea d) - equipamento a procurar nas descrições
+EQUIPMENT_PATTERNS = {
+    "barbell": r"\bbarbells?\b",
+    "dumbbell": r"\bdumb+ells?\b",          # apanha também o erro comum "dumbell"
+    "cable": r"\bcables?\b",
+    "machine": r"\bmachines?\b",
+    "bodyweight": r"\bbody[- ]?weight\b",
+    "bench": r"\bbench(es)?\b",
+    "kettlebell": r"\bkettle[- ]?bells?\b",
+    "band": r"\bbands?\b",
+    "pull-up bar": r"\b(pull|chin)[- ]?up bars?\b",
+    "ez-bar": r"\b(ez|sz)[- ]?bars?\b",
+    "ball": r"\b(swiss|exercise|stability|medicine|gym) balls?\b",
+    "mat": r"\bmats?\b",
+    "rope": r"\bropes?\b",
+    "plate": r"\bplates?\b",
+}
+
 
 # ---------------------------------------------------------------------------
 # Comunicação com a API
@@ -137,6 +175,98 @@ def fetch_exercises(params=None, limit=None):
     return exercises
 
 
+def find_filters(term):
+    """
+    Descobre a que músculos e/ou categorias corresponde o termo escrito.
+    Devolve uma lista de filtros para a API, ex.: [{"muscles": 1}, {"category": 8}].
+    Primeiro tenta o nome exato; se não houver, aceita nomes que contenham o termo.
+    """
+    term = term.strip().lower()
+    muscles = list(paginate("muscle/"))
+    categories = list(paginate("exercisecategory/"))
+
+    exact, partial = [], []
+    for muscle in muscles:
+        names = [(muscle["name_en"] or "").lower(), muscle["name"].lower()]
+        if term in names:
+            exact.append({"muscles": muscle["id"]})
+        elif any(term in name for name in names):
+            partial.append({"muscles": muscle["id"]})
+    for category in categories:
+        name = category["name"].lower()
+        if term == name:
+            exact.append({"category": category["id"]})
+        elif term in name:
+            partial.append({"category": category["id"]})
+
+    return exact or partial
+
+
+def search_exercises(term, limit=None):
+    """Pesquisa exercícios por músculo e/ou categoria (sem repetidos)."""
+    filters = find_filters(term)
+    if not filters:
+        fail(f"'{term}' não é um músculo nem uma categoria. "
+             "Use os comandos 'muscles' e 'categories' para ver os nomes válidos.")
+
+    found = {}
+    for api_filter in filters:
+        for exercise in fetch_exercises(api_filter, limit):
+            found.setdefault(exercise["id"], exercise)   # o id evita repetidos
+    return list(found.values())[:limit]
+
+
+def classify(exercise):
+    """
+    Alínea c) - infere o tipo de esforço: compound, isolated, cardio ou other.
+    As regras são testadas por ordem, da mais fiável para a menos fiável:
+    categoria -> nome do exercício -> descrição -> número de músculos.
+    """
+    name = exercise["name"]
+    description = exercise["description"]
+
+    # 1. Cardio: pela categoria ou por palavras no nome
+    if exercise["category"] == "Cardio" or CARDIO_RE.search(name):
+        return "cardio"
+
+    # 2. Alongamentos, yoga, mobilidade... não são treino de força
+    if OTHER_RE.search(name):
+        return "other"
+
+    # 3. Nome do movimento (squat, press, row... / curl, raise, fly...)
+    if COMPOUND_NAME_RE.search(name):
+        return "compound"
+    if ISOLATED_NAME_RE.search(name):
+        return "isolated"
+
+    # 4. A própria descrição diz o tipo ("compound exercise", "isolation ...")
+    says_compound = COMPOUND_DESC_RE.search(description)
+    says_isolated = ISOLATED_DESC_RE.search(description)
+    if says_compound and not says_isolated:
+        return "compound"
+    if says_isolated and not says_compound:
+        return "isolated"
+
+    # 5. Número de músculos envolvidos
+    if len(exercise["muscles"]) >= 3:
+        return "compound"
+    if len(exercise["muscles"]) >= 1:
+        return "isolated"
+    return "other"
+
+
+def count_equipment(exercises):
+    """Alínea d) - conta as menções a cada equipamento nas descrições."""
+    counts = {}
+    for exercise in exercises:
+        for equipment, pattern in EQUIPMENT_PATTERNS.items():
+            mentions = re.findall(pattern, exercise["description"], re.IGNORECASE)
+            if mentions:
+                counts[equipment] = counts.get(equipment, 0) + len(mentions)
+    ordered = sorted(counts.items(), key=lambda item: item[1], reverse=True)
+    return [{equipment: total} for equipment, total in ordered]
+
+
 def print_json(data):
     """Escreve os dados no terminal em formato JSON."""
     typer.echo(json.dumps(data, indent=2, ensure_ascii=False))
@@ -156,6 +286,38 @@ def top(n: int = typer.Argument(10, min=1, help="Número de exercícios a listar
     """a) Lista os N exercícios mais recentes da base de dados."""
     exercises = fetch_exercises({"ordering": "-created"}, limit=n)
     print_json([pick(e, ["id", "name", "category", "equipment"]) for e in exercises])
+
+
+@app.command()
+def search(
+    term: str = typer.Argument(..., help="Nome do músculo ou da categoria (ex.: biceps, chest)."),
+    n: int = typer.Argument(10, min=1, help="Número máximo de resultados."),
+):
+    """b) Pesquisa exercícios por músculo e/ou categoria."""
+    exercises = search_exercises(term, limit=n)
+    print_json([pick(e, ["id", "name", "category", "muscles", "equipment"]) for e in exercises])
+
+
+@app.command("type")
+def effort_type(exercise_id: int = typer.Argument(..., help="Id do exercício na API.")):
+    """c) Indica o tipo de esforço de um exercício: compound, isolated, cardio ou other."""
+    raw = get_json(f"{BASE_URL}exerciseinfo/{exercise_id}/",
+                   not_found=f"não existe nenhum exercício com o id {exercise_id}")
+    exercise = simplify(raw)
+    if exercise is None:
+        fail(f"o exercício {exercise_id} não tem tradução em inglês")
+    typer.echo(classify(exercise))
+
+
+@app.command()
+def equipment(category: str = typer.Argument(..., help="Nome da categoria (ex.: chest).")):
+    """d) Conta as menções a equipamento nas descrições de uma categoria."""
+    categories = {c["name"].lower(): c["id"] for c in paginate("exercisecategory/")}
+    category_id = categories.get(category.strip().lower())
+    if category_id is None:
+        fail(f"categoria '{category}' desconhecida. Categorias: {', '.join(categories)}")
+    exercises = fetch_exercises({"category": category_id})
+    print_json(count_equipment(exercises))
 
 
 if __name__ == "__main__":
