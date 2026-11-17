@@ -86,6 +86,13 @@ EQUIPMENT_PATTERNS = {
 }
 
 
+class Effort(str, Enum):
+    """Valores aceites no comando workout."""
+    compound = "compound"
+    isolated = "isolated"
+    any = "any"
+
+
 # ---------------------------------------------------------------------------
 # Comunicação com a API
 # ---------------------------------------------------------------------------
@@ -318,6 +325,41 @@ def equipment(category: str = typer.Argument(..., help="Nome da categoria (ex.: 
         fail(f"categoria '{category}' desconhecida. Categorias: {', '.join(categories)}")
     exercises = fetch_exercises({"category": category_id})
     print_json(count_equipment(exercises))
+
+
+@app.command()
+def workout(
+    targets: str = typer.Argument(..., help="Músculos/categorias separados por vírgula (ex.: biceps,back)."),
+    effort: Effort = typer.Argument(..., help="Tipo de esforço pretendido."),
+    n: int = typer.Argument(..., min=1, help="Número máximo de exercícios por músculo/categoria."),
+    csv_file: Optional[str] = typer.Option(None, "--csv", help="Exporta o plano para este ficheiro CSV."),
+):
+    """e) Gera um plano de treino a partir de músculos/categorias e tipo de esforço."""
+    plan = {}
+    for target in [t.strip() for t in targets.split(",") if t.strip()]:
+        selected = []
+        for exercise in search_exercises(target):
+            exercise["type"] = classify(exercise)
+            if effort == Effort.any or exercise["type"] == effort.value:
+                selected.append(pick(exercise, ["name", "type", "category", "muscles", "equipment"]))
+            if len(selected) >= n:
+                break
+        plan[target] = selected
+
+    if csv_file is None:
+        print_json(plan)
+        return
+
+    rows = 0
+    with open(csv_file, "w", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+        writer.writerow(["target", "name", "type", "category", "muscles", "equipment"])
+        for target, exercises in plan.items():
+            for e in exercises:
+                writer.writerow([target, e["name"], e["type"], e["category"],
+                                 "; ".join(e["muscles"]), "; ".join(e["equipment"])])
+                rows += 1
+    typer.echo(f"Ficheiro exportado: {csv_file} ({rows} registos)")
 
 
 if __name__ == "__main__":
