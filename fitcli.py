@@ -362,5 +362,19 @@ def workout(
     typer.echo(f"Ficheiro exportado: {csv_file} ({rows} registos)")
 
 
+# --- Extras -----------------------------------------------------------------
+
+@app.command("categories")
+def list_categories():
+    """Extra: lista as categorias de exercícios disponíveis na API."""
+    print_json([c["name"] for c in paginate("exercisecategory/")])
+
+
+@app.command("muscles")
+def list_muscles():
+    """Extra: lista os músculos disponíveis na API (nome comum e nome em latim)."""
+    print_json([{"name": m["name_en"] or m["name"], "latin": m["name"]} for m in paginate("muscle/")])
+
+
 if __name__ == "__main__":
     app()
